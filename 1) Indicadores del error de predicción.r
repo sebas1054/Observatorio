@@ -8,7 +8,9 @@ library(lmtest)
 library(stats)
 library(urca)
 library(uroot)
- 
+library(httpgd)
+
+df <- read_excel("C:/Users/johan/OneDrive/Documents/Analisis macroeconomico/ipc 2003 2026.xlsx")
  # SE ACOMODA LA BASE DE DATOS Y SE GRAFICA ----------
 getwd()
 setwd("..")
@@ -16,6 +18,8 @@ list.files()
 setwd("Data")
 
 df <- read_excel("ipc 2003 2026 (Wilmer).xlsx")
+
+
 df$Fecha <- as.Date(df$Fecha)
 # 2. Filtar hasta diciembre de 2025 <- elimina 2026 porque después va a probar los pronósticos con este año
 df <- df[df$Fecha <= as.Date("2025-12-31"),]
@@ -70,6 +74,112 @@ Box.test(df$residuos_stl, lag=24, type = "Ljung") #Correlación del componente r
 # 5. Serie desestacionalizada 
 df$inf_stl <- c(NA, diff(df$lipc) - df$estacionalidad[-1])
 
+
+
 # 6. Graficar original vs desestacionalizada 
 autoplot(cbind(diff(df$lipc), df$inf_stl[-1]))+
-ggtitle("Inflación original y desestacionalizada STL")
+    ggtitle("Inflación original y desestacionalizada STL")+
+    xlab("Año") + ylab("Valor")+
+    theme_minimal()
+
+acf(diff(df$lipc), lag.max = 48, main = "ACF de inflación")
+pacf(diff(df$lipc), lag.max= 48, main = "PACF de inflación")
+
+# HEGY test para raíces unitarias estacionales  <- nos permite decidir si necesitamos una diferenciación estacional
+# HEGY, también nos dice en qué frecuencias estacionales podría existir una raíz unitaria (mensual, anual, trimestral... )
+summary(hegy.test(diff(df$lipc), deterministic = c(1, 0, 1), lag.method = "AIC"))
+summary(hegy.test(diff(df$lipc), deterministic = c(1, 0, 0), lag.method = "AIC"))
+# Componentes de la sintaxis de hegy.test:
+# deterministic: Le indica a HEGY qué componentes determinísticos debe incluir en la regresión auxiliar 
+# c(constante, tendencia, dummies estacionales)
+# lag.method="AIC": Determina cuántos rezagos debo incluir utilizando el criterio de información Akaike 
+
+
+# Canova-Hansen (CH) test para estabilidad estacional 
+print(ch.test(diff(df$lipc), type= "dummy", lag1= T))  # Estamos queriendo ver si la estacionalidad de la inflación mensual es estable a través del tiempo 
+# lag1 = T: lo que está haciendo es que está incluyendo un rezago de la variable dependiente en la regresión auxiliar, esto es para controlar por autocorrelación. Si no se controla por autocorrelación, el test puede dar resultados falsos positivos.
+print(ch.test(diff(df$lipc), type= "dummy", lag1 = F))
+
+
+# Ajustar el modelo ARIMA con SAR(1) y AR(1), sin diferenciación estacional
+modelo_nivel <- Arima(diff(df$lipc),
+                    order = c(2, 0, 1),
+                    seasonal = c(1, 0, 1),
+                    xreg = seasonaldummy(diff(df$lipc)),
+                    include.constant = T)
+
+summary(modelo_nivel)   
+checkresiduals(modelo_nivel) # Esto es para ver si los residuos del modelo ARIMA son ruido blanco, si no lo son, significa que el modelo no está capturando toda la dinámica de la serie y hay que buscar otro modelo ARIMA
+plot(modelo_nivel)
+coeftest(modelo_nivel)
+
+autoplot(forecast(modelo_nivel, h=24, xreg = seasonaldummy(df$lipc, 24), level =c(95)))
+
+
+# Ahora se hace el HEGY test sobre la serie diferenciada dos veces
+
+summary(hegy.test(diff(df$lipc, 2), deterministic = c(1, 0, 1), lag.method = "AIC"))
+summary(hegy.test(diff(df$lipc, 2), deterministic = c(0, 0, 1), lag.method = "AIC"))
+
+# Canova-Hansen (CH) test para estabilidad estacional
+print(ch.test(diff(df$lipc, 2), type= "dummy", lag1= T))  # Estamos queriendo ver si la estacionalidad de la inflación mensual es estable a través del tiempo
+
+autoplot(diff(df$lipc, 2))
+
+acf(diff(df$lipc, 2), lag.max = 48, main="ACF de Inflación")
+pacf(diff(df$lipc, 2), lag.max = 48, main="PACF de Inflación")
+
+# Ajustar el modelo ARIMA con SAR(1) y AR(1), sin diferenciación estacional
+modelo_dif <- Arima(diff(df$lipc),
+                    order = c(1, 1, 1),
+                    seasonal = c(1, 0, 1),
+                    xreg = seasonaldummy(diff(df$lipc)),
+                    include.constant = F)
+summary(modelo_dif)
+checkresiduals(modelo_dif)
+plot(modelo_dif)
+coeftest(modelo_dif)
+
+autoplot(forecast(modelo_dif, h=24, xreg = seasonaldummy(df$lipc, 24), level =c(95)))
+
+
+
+
+
+
+
+# =================== ENTRENAMIENTO DEL FORECAST =========================
+library(forecast)
+
+# supongamos que tu serie lipc va desde 2003-01 a 2025-12
+# Definimos subconjunto de entrenamiento (ejemplo: hasta 2020-12)
+
+train <- window(diff(df$lipc), end = c(2018, 12))
+test <- window(diff(df$lipc), start = c(2019, 1))
+
+# Dummies estacionales recortadas al mismo tiempo
+xreg_train <- seasonaldummy(train)
+xreg_test <- seasonaldummy(test)
+
+# Re-estimar modelo_dif sobre el subconjunto de entrenamiento 
+modelo_dif_train <- Arima(train,
+                          order = c(1, 1, 1),
+                          seasonal = c(1, 0, 1),
+                          xreg = xreg_train,
+                          include.constant = F)
+
+# Re-estimar modelo_nivel sobre el subconjunto de entrenamiento
+modelo_nivel_train <- Arima(train,
+                          order = c(2, 0, 1),
+                          seasonal = c(1, 0, 1),
+                          xreg = xreg_train,
+                          include.constant = T)
+
+# Pronósticos sobre el conjunto de prueba
+fcast_dif <- forecast(modelo_dif_train, xreg = xreg_test, h = length(test))
+fcast_nivel <- forecast(modelo_nivel_train, xreg = xreg_test, h = length(test))
+
+# Comparar contra los valores reales del test
+accuracy(fcast_dif, test)
+accuracy(fcast_nivel, test)
+
