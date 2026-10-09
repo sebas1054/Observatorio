@@ -41,7 +41,6 @@ df$lipc <- ts(df$lipc,
 autoplot(df$IPC) + theme_minimal()
 autoplot(df$lipc) + theme_minimal()
 
-
 # DESCOMPOSICIÓN DE LA SERIE ----
 
 # 1. Descomposición STL
@@ -75,8 +74,7 @@ Box.test(df$residuos_stl, lag=24, type = "Ljung") #Correlación del componente r
 df$inf_stl <- c(NA, diff(df$lipc) - df$estacionalidad[-1])
 
 
-
-# 6. Graficar original vs desestacionalizada 
+# Graficar original vs desestacionalizada
 autoplot(cbind(diff(df$lipc), df$inf_stl[-1]))+
     ggtitle("Inflación original y desestacionalizada STL")+
     xlab("Año") + ylab("Valor")+
@@ -85,6 +83,7 @@ autoplot(cbind(diff(df$lipc), df$inf_stl[-1]))+
 acf(diff(df$lipc), lag.max = 48, main = "ACF de inflación")
 pacf(diff(df$lipc), lag.max= 48, main = "PACF de inflación")
 
+#endregion
 # HEGY test para raíces unitarias estacionales  <- nos permite decidir si necesitamos una diferenciación estacional
 # HEGY, también nos dice en qué frecuencias estacionales podría existir una raíz unitaria (mensual, anual, trimestral... )
 summary(hegy.test(diff(df$lipc), deterministic = c(1, 0, 1), lag.method = "AIC"))
@@ -147,7 +146,6 @@ autoplot(forecast(modelo_dif, h=24, xreg = seasonaldummy(df$lipc, 24), level =c(
 
 
 
-
 # =================== ENTRENAMIENTO DEL FORECAST =========================
 library(forecast)
 
@@ -179,7 +177,141 @@ modelo_nivel_train <- Arima(train,
 fcast_dif <- forecast(modelo_dif_train, xreg = xreg_test, h = length(test))
 fcast_nivel <- forecast(modelo_nivel_train, xreg = xreg_test, h = length(test))
 
-# Comparar contra los valores reales del test
+
+
+
+# PRIMERA SOLUCIÓN PARA MEJORAR EL AJUSTE DEL MODELO (MÁS REZAGOS ARMA) -----
+# 1. Poner más rezagos en la parte ARMA
+
+modelo2_dif_train <- Arima(train,
+                            order = c(2, 1, 2),
+                            seasonal = c(1, 0, 1),
+                            xreg = xreg_train,
+                            include.constant = FALSE
+)
+modelo2_nivel_train <- Arima(train,
+                            order = c(2, 0, 2),
+                            seasonal = c(1, 0, 1),
+                            xreg = xreg_train,
+                            include.constant = TRUE
+)
+fcast2_dif <- forecast(modelo2_dif_train, xreg= xreg_test, h= length(test))
+fcast2_nivel <- forecast(modelo2_nivel_train, xreg = xreg_test, h = length(test))
+
+modelo3_dif_train <- Arima(train,
+                            order = c(3, 1, 3),
+                            seasonal = c(1, 0, 1),
+                            xreg = xreg_train,
+                            include.constant = FALSE
+)
+modelo3_nivel_train <- Arima(train,
+                            order = c(3, 0, 2),
+                            seasonal = c(1, 0, 1),
+                            xreg = xreg_train,
+                            include.constant = TRUE
+)
+fcast3_dif <- forecast(modelo3_dif_train, xreg= xreg_test, h= length(test))
+fcast3_nivel <- forecast(modelo3_nivel_train, xreg = xreg_test, h = length(test))
+
+modelo4_dif_train <- Arima(train,
+                            order = c(4, 1, 4),
+                            seasonal = c(1, 0, 1),
+                            xreg = xreg_train,
+                            include.constant = FALSE
+)
+modelo4_nivel_train <- Arima(train,
+                            order = c(4, 0, 4),
+                            seasonal = c(1, 0, 1),
+                            xreg = xreg_train,
+                            include.constant = TRUE
+)
+fcast4_dif <- forecast(modelo4_dif_train, xreg= xreg_test, h= length(test))
+fcast4_nivel <- forecast(modelo4_nivel_train, xreg = xreg_test, h = length(test))
+
+### SE EVALUA EL CRITERIO MASE Y ACF1 (compara con un ramdom walk y mira la autocorrelación de los residuos)
+accuracy(fcast_dif, test)       # 1.1846852 / 0.73496455
+accuracy(fcast_nivel, test)     # 1.1437882 / 0.7349868857 *
+
+accuracy(fcast2_dif, test)      # 1.2244868 / 0.735205135
+accuracy(fcast2_nivel, test)    # 1.1438763 / 0.73455664 *
+
+accuracy(fcast3_dif, test)      # 1.1914320 / 0.72910157
+accuracy(fcast3_nivel, test)    # 1.1390424 / 0.73500994 **
+
+accuracy(fcast4_dif, test)      # 1.1325950 / 0.72348265
+accuracy(fcast4_nivel, test)    # 1.1325950 / 0.72348265 **
+
+
+# SEGUNDA SOLUCIÓN PARA MEJORAR EL AJUSTE DEL MODELO (DUMMIES ESTACIONALES)
+#   La cuarentena en Colombia empezó el 25 de marzo de 2020 y se extendió hasta el 31 de agosto de 2020 
+
+
+# Para hacer el proceso de agregarle las dummies estacionales, se aplica una interpolación para tener una idea de cuánto fue el efecto de la cuarente (es efecto se le descuenta para hallar la serie limpia): 
+inflacion <- df$inf_stl  # <- Esta es la aproximación de la inflación desestacionalizada
+mes <- format(df$Fecha[-1], "%Y-%m")
+df$dummy_cuarentena <- as.integer(
+    mes >= "2020-03" & mes <="2020-08"
+)
+# Comprobamos que las dummies que creamos cubran los meses esperados 
+data.frame(Fecha = df$Fecha, dummy = df$dummy_cuarentena) |> subset(dummy == 1)
+
+# Índice de los meses afectados
+idx_cuarentena <- which(df$dummy_cuarentena == 1)
+idx_normales <- which(df$dummy_cuarentena == 0)
+
+inflacion[idx_cuarentena] <- approx(
+    x = idx_normales,
+    y = inflacion[idx_normales],
+    xout = idx_cuarentena
+)$y
+
+
+# Devolviendo la estructural temporal
+inflacion <- ts(inflacion, start = start(df$inf_stl), frequency = frequency(inflacion))
+
+plot(inflacion)
+
+df$d.cuarentena <- as.integer(df$Fecha >="2020-03-01" & df$Fecha <= "2020-08-01")
+idx_cuarentena <- which(df$d.cuarentena == 1)
+idx_normales <- which(df$d.cuarentena == 0)
+
+df$infla <- df$inf_stl
+df$infla[idx_cuarentena] <- approx(x=idx_normales, y=df$infla[idx_normales], xout = idx_cuarentena)$y
+
+
+y <- diff(df$lipc)
+
+infla_ts <- ts(
+  as.numeric(df$infla[-1]),
+  start = start(y),
+  frequency = frequency(y)
+)
+
+train <- window(infla_ts, end = c(2018, 12))
+test  <- window(infla_ts, start = c(2019, 1))
+
+xreg_train <- seasonaldummy(train)
+xreg_test  <- seasonaldummy(test)
+
+
+# Re-estimar modelo_dif sobre el subconjunto de entrenamiento 
+modelo_dif_train <- Arima(train,
+                          order = c(1, 1, 1),
+                          seasonal = c(1, 0, 1),
+                          xreg = xreg_train,
+                          include.constant = F)
+
+# Re-estimar modelo_nivel sobre el subconjunto de entrenamiento
+modelo_nivel_train <- Arima(train,
+                          order = c(4, 0, 3),
+                          seasonal = c(1, 0, 1),
+                          xreg = xreg_train,
+                          include.constant = T)
+
+# Pronósticos sobre el conjunto de prueba
+fcast_dif <- forecast(modelo_dif_train, xreg = xreg_test, h = length(test))
+fcast_nivel <- forecast(modelo_nivel_train, xreg = xreg_test, h = length(test))
+
 accuracy(fcast_dif, test)
 accuracy(fcast_nivel, test)
 
