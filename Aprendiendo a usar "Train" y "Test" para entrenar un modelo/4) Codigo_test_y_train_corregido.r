@@ -1,3 +1,5 @@
+### A continuación, al código se le agregan las variables dummy correspondientes a los meses de cuarentena, se hace una interpolación para intentar quitar el efecto pandemia
+
 library(readxl)
 library(dplyr)
 library(forecast)
